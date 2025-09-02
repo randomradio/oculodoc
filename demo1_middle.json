@@ -1,0 +1,55 @@
+{
+  "doc_layout_result": {
+    "layout_dets": [],
+    "page_info": [
+      {
+        "page_no": 1,
+        "height": 0,
+        "width": 0,
+        "layout_dets": [
+          {
+            "category_id": 0,
+            "type": "text",
+            "bbox": [
+              10,
+              20,
+              200,
+              50
+            ],
+            "score": 0.92
+          }
+        ]
+      }
+    ]
+  },
+  "text_blocks": [
+    {
+      "page_no": 1,
+      "bbox": [
+        10,
+        20,
+        200,
+        50
+      ],
+      "content": "Enhanced text content from hybrid analysis",
+      "score": 0.92
+    }
+  ],
+  "title_blocks": [],
+  "figure_blocks": [],
+  "table_blocks": [],
+  "footnote_blocks": [],
+  "page_images": [],
+  "meta_data": {
+    "doc_name": "demo1.pdf",
+    "doc_path": "demo1.pdf",
+    "total_pages": 1,
+    "processing_time": 1.6927719116210938e-05,
+    "model_info": {
+      "layout_analyzer": "DocLayoutYOLOAnalyzer",
+      "vlm_analyzer": "SGLangOCRFluxAnalyzer"
+    }
+  },
+  "version": "oculodoc-1.0",
+  "timestamp": 1756798830.4576461
+}

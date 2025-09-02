@@ -1,6 +1,50 @@
 [project]
 name = "oculodoc"
 version = "0.1.0"
-description = "Add your description here"
+description = "Production-ready document processing system with Vision-Language Models"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "typing-extensions>=4.8.0",
+    "pyyaml>=6.0.0",
+    "ultralytics>=8.0.0",    # For YOLO models
+    "torch>=2.0.0",          # PyTorch for model inference
+    "torchvision>=0.15.0",   # Computer vision utilities
+    "numpy>=1.24.0",         # Numerical operations
+    "aiohttp>=3.9.0",        # For async HTTP requests
+    "requests>=2.31.0",      # For downloading models
+    "huggingface-hub>=0.17.0", # For HuggingFace model downloads
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.6.0",
+    "flake8>=6.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["oculodoc/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--disable-warnings",
+    "--tb=short",
+    "-v"
+]
+markers = [
+    "asyncio: marks tests as async (using pytest-asyncio)",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
