@@ -3,7 +3,10 @@
 import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+from io import BytesIO
+import base64
 from PIL import Image
+import fitz  # PyMuPDF
 
 from ..interfaces import (
     IDocumentProcessor,
@@ -141,23 +144,64 @@ class BaseDocumentProcessor(IDocumentProcessor):
                 stage="layout_analysis",
             )
 
+        # Map category names to simplified block types used by middle.json
+        def _map_category_to_type(category_name: str) -> str:
+            name = category_name.lower()
+            if "title" in name:
+                return "title"
+            if "table" in name:
+                return "table"
+            if "image" in name or "figure" in name:
+                return "figure"
+            return "text"
+
+        # If the document is a PDF, rasterize each page and run YOLO
+        if document_path.suffix.lower() == ".pdf":
+            pages: List[Dict[str, Any]] = []
+            doc = fitz.open(str(document_path))
+            try:
+                for page_index in range(doc.page_count):
+                    page = doc.load_page(page_index)
+                    pix = page.get_pixmap(dpi=150)
+                    if pix.alpha:
+                        pix = fitz.Pixmap(fitz.csRGB, pix)
+                    img_bytes = pix.tobytes("png")
+                    image = Image.open(BytesIO(img_bytes))
+
+                    detections = await self.layout_analyzer.analyze(image, **kwargs)
+
+                    width, height = image.size
+                    layout_elements: List[Dict[str, Any]] = []
+                    for det in detections:
+                        layout_elements.append(
+                            {
+                                "type": _map_category_to_type(det.category_name),
+                                "bbox": det.bbox,
+                                "content": "",
+                                "confidence": det.confidence,
+                                "category_id": det.category_id,
+                            }
+                        )
+
+                    pages.append(
+                        {
+                            "page_number": page_index + 1,
+                            "layout_elements": layout_elements,
+                            "image_path": str(document_path),
+                            "width": width,
+                            "height": height,
+                        }
+                    )
+            finally:
+                doc.close()
+            return pages
+
         # If the document is an image, run real layout analysis via analyzer
         image_exts = {".jpg", ".jpeg", ".png", ".tiff", ".bmp"}
         if document_path.suffix.lower() in image_exts:
             image = Image.open(document_path)
 
             detections = await self.layout_analyzer.analyze(image, **kwargs)
-
-            # Map category names to simplified block types used by middle.json
-            def _map_category_to_type(category_name: str) -> str:
-                name = category_name.lower()
-                if "title" in name:
-                    return "title"
-                if "table" in name:
-                    return "table"
-                if "image" in name or "figure" in name:
-                    return "figure"
-                return "text"
 
             width, height = image.size
             layout_elements: List[Dict[str, Any]] = []
@@ -182,23 +226,8 @@ class BaseDocumentProcessor(IDocumentProcessor):
                 }
             ]
 
-        # Fallback mock structure for non-image inputs (e.g., PDFs not yet rasterized)
-        return [
-            {
-                "page_number": 1,
-                "layout_elements": [
-                    {
-                        "type": "text",
-                        "bbox": [10, 20, 200, 50],
-                        "content": "Sample text content",
-                        "confidence": 0.95,
-                    }
-                ],
-                "image_path": str(document_path),
-                "width": 800,
-                "height": 600,
-            }
-        ]
+        # Fallback: unsupported type
+        return []
 
     async def _process_document_with_vlm(
         self, document_path: Path, **kwargs: Any
@@ -219,23 +248,85 @@ class BaseDocumentProcessor(IDocumentProcessor):
                 stage="vlm_analysis",
             )
 
-        # For now, return a mock page structure
-        # In a real implementation, this would:
-        # 1. Convert PDF to images
-        # 2. Run VLM analysis with prompts
-        # 3. Extract content
-        return [
-            {
-                "page_number": 1,
-                "content": "Extracted text content from VLM analysis",
-                "structured_data": {
-                    "title": "Document Title",
-                    "author": "Document Author",
-                    "summary": "Document summary...",
-                },
-                "confidence": 0.88,
-            }
-        ]
+        # Default prompt unless provided
+        prompt: str = kwargs.get(
+            "prompt",
+            "Extract the full plain text content of this page. Return only text.",
+        )
+
+        pages: List[Dict[str, Any]] = []
+
+        if document_path.suffix.lower() == ".pdf":
+            doc = fitz.open(str(document_path))
+            try:
+                for page_index in range(doc.page_count):
+                    page = doc.load_page(page_index)
+                    pix = page.get_pixmap(dpi=150)
+                    if pix.alpha:
+                        pix = fitz.Pixmap(fitz.csRGB, pix)
+                    img_bytes = pix.tobytes("png")
+                    image = Image.open(BytesIO(img_bytes))
+                    width, height = image.size
+
+                    buffer = BytesIO()
+                    image.convert("RGB").save(buffer, format="JPEG")
+                    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+                    results = await self.vlm_analyzer.analyze(
+                        encoded,
+                        prompt,
+                        max_tokens=self.config.vlm.max_tokens,
+                        temperature=self.config.vlm.temperature,
+                        timeout=self.config.vlm.timeout,
+                    )
+
+                    page_text_parts = [
+                        r.content for r in results if r.content_type == "text"
+                    ]
+                    page_text = "\n".join(page_text_parts).strip()
+
+                    pages.append(
+                        {
+                            "page_number": page_index + 1,
+                            "content": page_text,
+                            "confidence": max(
+                                (r.confidence for r in results), default=0.0
+                            ),
+                            "width": width,
+                            "height": height,
+                        }
+                    )
+            finally:
+                doc.close()
+            return pages
+
+        image_exts = {".jpg", ".jpeg", ".png", ".tiff", ".bmp"}
+        if document_path.suffix.lower() in image_exts:
+            image = Image.open(document_path)
+            width, height = image.size
+            buffer = BytesIO()
+            image.convert("RGB").save(buffer, format="JPEG")
+            encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            results = await self.vlm_analyzer.analyze(
+                encoded,
+                prompt,
+                max_tokens=self.config.vlm.max_tokens,
+                temperature=self.config.vlm.temperature,
+                timeout=self.config.vlm.timeout,
+            )
+            page_text_parts = [r.content for r in results if r.content_type == "text"]
+            page_text = "\n".join(page_text_parts).strip()
+            return [
+                {
+                    "page_number": 1,
+                    "content": page_text,
+                    "confidence": max((r.confidence for r in results), default=0.0),
+                    "width": width,
+                    "height": height,
+                }
+            ]
+
+        return []
 
     async def _process_document_hybrid(
         self, document_path: Path, **kwargs: Any
@@ -256,27 +347,34 @@ class BaseDocumentProcessor(IDocumentProcessor):
                 stage="hybrid_analysis",
             )
 
-        # For now, return a mock page structure
-        # In a real implementation, this would combine both analyses
-        return [
-            {
-                "page_number": 1,
-                "layout_elements": [
-                    {
-                        "type": "text",
-                        "bbox": [10, 20, 200, 50],
-                        "content": "Enhanced text content from hybrid analysis",
-                        "confidence": 0.92,
-                    }
-                ],
-                "vlm_content": "Additional content extracted by VLM",
-                "structured_data": {
-                    "title": "Document Title",
-                    "sections": ["Introduction", "Body", "Conclusion"],
-                },
-                "combined_confidence": 0.90,
-            }
-        ]
+        # Combine results by page
+        layout_pages = await self._process_document_with_layout(document_path, **kwargs)
+        vlm_pages = await self._process_document_with_vlm(document_path, **kwargs)
+
+        combined: List[Dict[str, Any]] = []
+        for idx, layout_page in enumerate(layout_pages):
+            vlm_page = vlm_pages[idx] if idx < len(vlm_pages) else {}
+            combined.append(
+                {
+                    "page_number": layout_page.get("page_number", idx + 1),
+                    "layout_elements": layout_page.get("layout_elements", []),
+                    "vlm_content": vlm_page.get("content", ""),
+                    "width": layout_page.get("width", vlm_page.get("width", 0)),
+                    "height": layout_page.get("height", vlm_page.get("height", 0)),
+                    "combined_confidence": max(
+                        max(
+                            (
+                                e.get("confidence", 0.0)
+                                for e in layout_page.get("layout_elements", [])
+                            ),
+                            default=0.0,
+                        ),
+                        vlm_page.get("confidence", 0.0),
+                    ),
+                }
+            )
+
+        return combined
 
     async def process_document(
         self, document_path: Path, **kwargs: Any

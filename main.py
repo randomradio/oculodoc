@@ -7,6 +7,7 @@ from pathlib import Path
 
 from oculodoc.config import OculodocConfig
 from oculodoc.processor import BaseDocumentProcessor
+from oculodoc.processor.hybrid_processor import HybridDocumentProcessor
 from oculodoc.layout import DocLayoutYOLOAnalyzer
 from oculodoc.vlm import SGLangOCRFluxAnalyzer
 from oculodoc.errors import OculodocError
@@ -20,8 +21,15 @@ async def create_processor_with_models(config: OculodocConfig):
         layout_analyzer = DocLayoutYOLOAnalyzer()
         await layout_analyzer.initialize(config.layout.__dict__)
         print("✅ DocLayout-YOLO analyzer initialized")
+        try:
+            info = await layout_analyzer.get_model_info()
+            print(f"   ▶ Loaded model path: {info.get('loaded_model_path')}")
+            print(f"   ▶ Configured model path: {info.get('configured_model_path')}")
+        except Exception:
+            pass
     except Exception as e:
         print(f"⚠️  DocLayout-YOLO analyzer failed to initialize: {e}")
+        layout_analyzer = None
 
     # Initialize VLM analyzer
     vlm_analyzer = None
@@ -31,11 +39,18 @@ async def create_processor_with_models(config: OculodocConfig):
         print("✅ SGLang OCRFlux analyzer initialized")
     except Exception as e:
         print(f"⚠️  SGLang OCRFlux analyzer failed to initialize: {e}")
+        vlm_analyzer = None
 
     # Create processor with analyzers
-    processor = BaseDocumentProcessor(
-        config=config, layout_analyzer=layout_analyzer, vlm_analyzer=vlm_analyzer
-    )
+    # Use hybrid processor by default when analyzers are available
+    if layout_analyzer and vlm_analyzer:
+        processor = HybridDocumentProcessor(
+            config=config, layout_analyzer=layout_analyzer, vlm_analyzer=vlm_analyzer
+        )
+    else:
+        processor = BaseDocumentProcessor(
+            config=config, layout_analyzer=layout_analyzer, vlm_analyzer=vlm_analyzer
+        )
 
     return processor
 
@@ -45,7 +60,12 @@ async def main() -> None:
     try:
         # Load configuration
         config = OculodocConfig()
-
+        # Prefer automatic device selection for YOLO to avoid CUDA errors on non-GPU hosts
+        config.layout.device = "auto"
+        # Enable hybrid mode
+        config.processing.use_hybrid = True
+        config.vlm.host = "10.112.1.28"
+        config.vlm.port = 8888
         print("🚀 Initializing Oculodoc...")
         processor = await create_processor_with_models(config)
 
@@ -140,6 +160,16 @@ async def main() -> None:
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
         sys.exit(1)
+    finally:
+        # Ensure analyzers are cleaned up
+        try:
+            if "processor" in locals():
+                if getattr(processor, "layout_analyzer", None):
+                    await processor.layout_analyzer.cleanup()
+                if getattr(processor, "vlm_analyzer", None):
+                    await processor.vlm_analyzer.cleanup()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

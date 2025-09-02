@@ -8,13 +8,16 @@ dependencies = [
     "pydantic>=2.0.0",
     "typing-extensions>=4.8.0",
     "pyyaml>=6.0.0",
-    "ultralytics>=8.0.0",    # For YOLO models
-    "torch>=2.0.0",          # PyTorch for model inference
-    "torchvision>=0.15.0",   # Computer vision utilities
-    "numpy>=1.24.0",         # Numerical operations
-    "aiohttp>=3.9.0",        # For async HTTP requests
-    "requests>=2.31.0",      # For downloading models
+    "ultralytics==8.0.196", # For YOLO models (compatible with doclayout-yolo)
+    "torch>=2.0.0", # PyTorch for model inference
+    "torchvision>=0.15.0", # Computer vision utilities
+    "numpy>=1.24.0", # Numerical operations
+    "aiohttp>=3.9.0", # For async HTTP requests
+    "requests>=2.31.0", # For downloading models
     "huggingface-hub>=0.17.0", # For HuggingFace model downloads
+    "pymupdf>=1.24.0", # PDF rasterization
+    "opencv-python-headless>=4.8.0", # OpenCV backend for YOLO dependencies
+    "doclayout-yolo>=0.0.3", # Plugin required by the model
 ]
 
 [dependency-groups]
@@ -31,6 +34,10 @@ dev = [
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["oculodoc*"]
+exclude = ["MinerU*"]
 
 [tool.pytest.ini_options]
 testpaths = ["oculodoc/tests"]

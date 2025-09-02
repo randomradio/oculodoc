@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional
 import logging
 
 import aiohttp
+import os
 from PIL import Image
 
 from ..interfaces.vlm_analyzer import IVLMAnalyzer, VLMAnalysisResult
@@ -25,7 +26,7 @@ class SGLangOCRFluxAnalyzer(IVLMAnalyzer):
         self,
         host: str = "localhost",
         port: int = 30000,
-        model_name: str = "ocrflux",
+        model_name: str = "chat-doc/ocrflux-3b",
         timeout: float = 30.0,
         max_retries: int = 3,
         retry_delay: float = 1.0,
@@ -359,11 +360,15 @@ class SGLangOCRFluxAnalyzer(IVLMAnalyzer):
                         operation="analyze",
                     )
             elif (
-                image_data.startswith("/")
-                or image_data.startswith("./")
-                or image_data.startswith("../")
+                (
+                    image_data.startswith("/")
+                    or image_data.startswith("./")
+                    or image_data.startswith("../")
+                )
+                and os.path.exists(image_data)
+                and os.path.isfile(image_data)
             ):
-                # file path
+                # treat as file path only if it exists
                 image = Image.open(image_data)
                 encoded_image = self._encode_image(image)
             else:

@@ -10,6 +10,13 @@ import torch
 from PIL import Image
 from ultralytics import YOLO
 import requests
+from torch.serialization import add_safe_globals
+
+# Optional MinerU-style backend
+try:
+    from doclayout_yolo import YOLOv10 as MinerUDocLayoutYOLO
+except Exception:
+    MinerUDocLayoutYOLO = None
 
 from ..interfaces.layout_analyzer import ILayoutAnalyzer, LayoutDetection
 from ..errors import ModelLoadError, InferenceError
@@ -70,8 +77,10 @@ class DocLayoutYOLOAnalyzer(ILayoutAnalyzer):
         self.max_batch_size = max_batch_size
         self.model_cache_dir = model_cache_dir or self._get_default_cache_dir()
 
-        self.model: Optional[YOLO] = None
+        self.model: Optional[object] = None
+        self._loaded_model_path: Optional[str] = None
         self.logger = logging.getLogger(__name__)
+        self._backend: str = "ultralytics"
 
     def _resolve_device(self, device: str) -> str:
         """Resolve device specification to actual device string."""
@@ -203,7 +212,7 @@ class DocLayoutYOLOAnalyzer(ILayoutAnalyzer):
             ModelLoadError: If model loading fails.
             ConfigurationError: If configuration is invalid.
         """
-        self.logger.info(f"Initializing DocLayout-YOLO analyzer with config: {config}")
+        print(f"Initializing DocLayout-YOLO analyzer with config: {config}")
         try:
             # Update configuration from provided config
             self.conf_threshold = config.get(
@@ -218,12 +227,67 @@ class DocLayoutYOLOAnalyzer(ILayoutAnalyzer):
             if "device" in config:
                 self.device = self._resolve_device(config["device"])
 
+            # Allowlist doclayout_yolo custom classes for safe torch.load (PyTorch >= 2.6)
+            try:
+                import doclayout_yolo.nn.tasks as dl_tasks  # type: ignore
+
+                try:
+                    add_safe_globals([dl_tasks.YOLOv10DetectionModel])  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                try:
+                    # Some versions expose a base YOLOv10Model; allowlist defensively
+                    add_safe_globals([dl_tasks.YOLOv10Model])  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+            except Exception:
+                # If the module is not available yet, YOLO may still handle load if weights are standard
+                pass
+
+            # Also allowlist common torch containers seen in pickled checkpoints
+            try:
+                import torch.nn.modules.container as torch_container  # type: ignore
+
+                add_safe_globals([torch_container.Sequential])  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
             # Ensure model is available
             model_path = self._ensure_model_available()
 
             # Load model in a thread to avoid blocking
             def load_model():
-                self.model = YOLO(model_path)
+                # Validate file exists right before load
+                mp = Path(model_path)
+                if not mp.exists() or not mp.is_file():
+                    raise ModelLoadError(
+                        f"Model file not found at load time: {mp}",
+                        model_type="doclayout_yolo",
+                        model_path=str(mp),
+                    )
+                # Prefer MinerU backend if available
+                if MinerUDocLayoutYOLO is not None:
+                    try:
+                        model = MinerUDocLayoutYOLO(str(mp))
+                        # Move to desired device if supported
+                        try:
+                            model = model.to(self.device)
+                        except Exception:
+                            pass
+                        self.model = model
+                        self._backend = "mineru"
+                        self._loaded_model_path = str(mp)
+                        return self.model
+                    except Exception as e:
+                        # Fallback to Ultralytics if MinerU path fails
+                        self.logger.warning(
+                            f"MinerU backend failed to load, falling back to Ultralytics: {e}"
+                        )
+
+                # Ultralytics fallback
+                self.model = YOLO(str(mp))
+                self._backend = "ultralytics"
+                self._loaded_model_path = str(mp)
                 return self.model
 
             # Run model loading in thread pool
@@ -231,10 +295,14 @@ class DocLayoutYOLOAnalyzer(ILayoutAnalyzer):
             await loop.run_in_executor(None, load_model)
 
             self.logger.info(
-                f"DocLayout-YOLO model loaded successfully on {self.device}"
+                f"DocLayout-YOLO model loaded successfully on {self.device} from {self._loaded_model_path}"
             )
 
+        except ModelLoadError:
+            # Propagate explicit model load errors without masking
+            raise
         except Exception as e:
+            # Wrap any other unexpected error
             raise ModelLoadError(
                 f"Failed to initialize DocLayout-YOLO model: {e}",
                 model_type="doclayout_yolo",
@@ -289,27 +357,28 @@ class DocLayoutYOLOAnalyzer(ILayoutAnalyzer):
             # Convert results to LayoutDetection objects
             detections = []
             for box in result.boxes:
-                if box.conf.item() >= self.conf_threshold:
-                    # Get bounding box coordinates
-                    bbox = box.xyxy[0].tolist()  # [x1, y1, x2, y2]
-
-                    # Get category information
+                # Some backends may already filter by conf; still gate here
+                score_val = float(box.conf.item())
+                if score_val >= self.conf_threshold:
+                    bbox = [float(v) for v in box.xyxy[0].tolist()]  # [x1, y1, x2, y2]
                     category_id = int(box.cls.item())
                     category_name = self.CATEGORY_MAP.get(
                         category_id, f"Unknown_{category_id}"
                     )
 
-                    detection = LayoutDetection(
-                        category_id=category_id,
-                        category_name=category_name,
-                        bbox=bbox,
-                        confidence=box.conf.item(),
-                        metadata={
-                            "model": "doclayout_yolo",
-                            "device": self.device,
-                        },
+                    detections.append(
+                        LayoutDetection(
+                            category_id=category_id,
+                            category_name=category_name,
+                            bbox=bbox,
+                            confidence=score_val,
+                            metadata={
+                                "model": "doclayout_yolo",
+                                "device": self.device,
+                                "backend": self._backend,
+                            },
+                        )
                     )
-                    detections.append(detection)
 
             return detections
 
@@ -340,7 +409,11 @@ class DocLayoutYOLOAnalyzer(ILayoutAnalyzer):
     async def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model."""
         if self.model is None:
-            return {"status": "not_loaded"}
+            return {
+                "status": "not_loaded",
+                "configured_model_path": self.model_path,
+                "loaded_model_path": None,
+            }
 
         return {
             "status": "loaded",
@@ -349,4 +422,6 @@ class DocLayoutYOLOAnalyzer(ILayoutAnalyzer):
             "conf_threshold": self.conf_threshold,
             "iou_threshold": self.iou_threshold,
             "supported_categories": self.supported_categories,
+            "configured_model_path": self.model_path,
+            "loaded_model_path": self._loaded_model_path,
         }
