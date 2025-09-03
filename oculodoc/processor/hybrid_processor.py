@@ -36,6 +36,20 @@ class HybridDocumentProcessor(BaseDocumentProcessor):
     ) -> None:
         super().__init__(config, layout_analyzer, vlm_analyzer)
 
+    def _map_category_to_type(self, category_name: str) -> str:
+        """Map detailed layout category to a simple type for middle.json."""
+        name = (category_name or "").lower()
+        if "title" in name:
+            return "title"
+        if "table" in name:
+            return "table"
+        if "image" in name or "figure" in name:
+            return "figure"
+        if "abandon" in name:
+            return "abandon"
+        # Default to text for "text", "ocrtext", "equation", etc.
+        return "text"
+
     def _encode_image(self, image: Image.Image) -> str:
         if image.mode != "RGB":
             image = image.convert("RGB")
@@ -45,14 +59,14 @@ class HybridDocumentProcessor(BaseDocumentProcessor):
 
     def _prompt_for_type(self, block_type: str) -> str:
         t = (block_type or "text").lower()
-        if t == "table":
+        if "table" in t:
             return (
                 "Extract the table as GitHub-flavored Markdown with correct rows and columns. "
                 "Return only the Markdown table."
             )
-        if t == "title":
+        if "title" in t:
             return "Transcribe the title text exactly. Return only the text."
-        if t == "figure":
+        if "figure" in t or "image" in t:
             return (
                 "If there is visible text, transcribe it. Otherwise provide a concise caption. "
                 "Return plain text."
@@ -88,13 +102,45 @@ class HybridDocumentProcessor(BaseDocumentProcessor):
         width, height = page_image.size
         enriched_elements: List[Dict[str, Any]] = []
 
+        # Prepare debug output directory for region crops
+        debug_dir = Path("output") / "regions" / f"page_{page_number:03d}"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        saved_idx = 0
+
+        print(f"Processing {len(detections)} regions for page {page_number}")
         for det in detections:
             if det.confidence < layout_conf_threshold:
                 continue
-            block_type = det.category_name
+            block_type_raw = det.category_name
+            simple_block_type = self._map_category_to_type(block_type_raw)
+
+            # Skip abandoned blocks
+            if simple_block_type == "abandon":
+                continue
+
             region_img = self._crop_bbox(page_image, det.bbox)
+            # Save region image for debugging
+            try:
+                x1, y1, x2, y2 = [int(v) for v in det.bbox]
+                safe_type = (block_type_raw or "unknown").lower().replace(" ", "_")
+                fname = (
+                    f"p{page_number:03d}_idx{saved_idx:03d}_"
+                    f"{safe_type}_conf{int(det.confidence * 100):02d}_"
+                    f"{x1}-{y1}-{x2}-{y2}.jpg"
+                )
+                img_to_save = (
+                    region_img.convert("RGB")
+                    if region_img.mode != "RGB"
+                    else region_img
+                )
+                img_to_save.save(debug_dir / fname, format="JPEG", quality=90)
+                saved_idx += 1
+            except Exception:
+                print(f"Error saving region image for {fname}")
+                pass
             encoded = self._encode_image(region_img)
-            prompt = self._prompt_for_type(block_type)
+            prompt = self._prompt_for_type(block_type_raw)
 
             try:
                 results = await self.vlm_analyzer.analyze(
@@ -109,12 +155,13 @@ class HybridDocumentProcessor(BaseDocumentProcessor):
                 region_text = "\n".join(content_parts).strip()
                 best_conf = max((r.confidence for r in results), default=0.0)
             except Exception as e:
+                print(f"Error analyzing region for {fname}: {e}")
                 region_text = f"[VLM error: {e}]"
                 best_conf = 0.0
 
             enriched_elements.append(
                 {
-                    "type": block_type.lower(),
+                    "type": simple_block_type,
                     "bbox": det.bbox,
                     "content": region_text,
                     "confidence": max(det.confidence, best_conf),

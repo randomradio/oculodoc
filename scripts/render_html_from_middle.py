@@ -4,6 +4,12 @@ import os
 from html import escape
 from typing import Any, Dict, List, Tuple
 
+try:
+    import markdown2
+except ImportError:
+    print("Markdown library not found. Please run: pip install markdown")
+    exit(1)
+
 
 def read_middle_json(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
@@ -23,19 +29,26 @@ def get_page_sizes(doc: Dict[str, Any]) -> Dict[int, Tuple[int, int]]:
 
 def collect_blocks(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
     blocks: List[Dict[str, Any]] = []
-    # Prefer text_blocks for reconstruction if present (already OCR'd content)
-    if isinstance(doc.get("text_blocks"), list):
-        for b in doc["text_blocks"]:
-            blocks.append(
-                {
-                    "type": "text",
-                    "page_no": int(b.get("page_no")),
-                    "bbox": b.get("bbox", [0, 0, 0, 0]),
-                    "content": b.get("content", ""),
-                    "score": b.get("score"),
-                }
-            )
-    # Future: merge image/table blocks if provided by other keys
+    # Block types to look for in the middle.json
+    block_keys = {
+        "text": "text_blocks",
+        "title": "title_blocks",
+        "figure": "figure_blocks",
+        "table": "table_blocks",
+    }
+
+    for block_type, key in block_keys.items():
+        if isinstance(doc.get(key), list):
+            for b in doc[key]:
+                blocks.append(
+                    {
+                        "type": block_type,
+                        "page_no": int(b.get("page_no")),
+                        "bbox": b.get("bbox", [0, 0, 0, 0]),
+                        "content": b.get("content", ""),
+                        "score": b.get("score"),
+                    }
+                )
     return blocks
 
 
@@ -84,17 +97,86 @@ def render_page_html(
         x0, y0, x1, y1 = [float(v) for v in b.get("bbox", [0, 0, 0, 0])]
         left, top = x0, y0
         w, h = max(0.0, x1 - x0), max(0.0, y1 - y0)
-        content = escape(str(b.get("content", "")))
+        raw_content = str(b.get("content", ""))
         btype = escape(str(b.get("type", "unknown")))
         score = b.get("score")
         score_str = f"{float(score):.3f}" if isinstance(score, (int, float)) else ""
+
+        content_html: str
+        # cleanup raw_content by removing ```markdown and ```
+        raw_content = raw_content.replace("```markdown", "").replace("```", "")
+        # normalize escaped newlines/tabs and consecutive pipes so markdown/pandas parsers work
+        raw_content = raw_content.replace("\\n", "\n")
+        while "||" in raw_content:
+            raw_content = raw_content.replace("||", "| |")
+        if btype == "table" and raw_content:
+            # Prefer structured rendering via pandas + tabulate; fallback to markdown
+            def _render_table_with_pandas(markdown_table: str) -> str:
+                try:
+                    # Local imports to keep dependency optional
+                    import pandas as pd  # type: ignore
+                    from tabulate import tabulate  # type: ignore
+                    from io import StringIO
+
+                    # Clean markdown table: remove separator rows and edge pipes
+                    lines = [
+                        ln.strip()
+                        for ln in markdown_table.strip().splitlines()
+                        if ln.strip()
+                    ]
+                    cleaned_lines: List[str] = []
+                    for ln in lines:
+                        # Skip header separator rows like |---|: only contains | - : and spaces
+                        if set(ln) <= set("|-: "):
+                            continue
+                        cleaned_lines.append(ln.strip().strip("|"))
+
+                    if not cleaned_lines:
+                        raise ValueError("empty table after cleaning")
+
+                    csv_like = "\n".join(cleaned_lines)
+                    df = pd.read_csv(StringIO(csv_like), sep="|", engine="python")
+
+                    # Drop unnamed/empty columns produced by stray pipes
+                    cols_to_drop: List[str] = []
+                    for col in list(df.columns):
+                        col_str = str(col).strip()
+                        if not col_str or col_str.lower().startswith("unnamed"):
+                            cols_to_drop.append(col)
+                    if cols_to_drop:
+                        df = df.drop(columns=cols_to_drop)
+
+                    # Also drop columns that are entirely NA
+                    df = df.dropna(axis=1, how="all")
+
+                    if df.shape[1] == 0:
+                        raise ValueError("no columns after cleanup")
+
+                    # Render to HTML table without index
+                    return tabulate(
+                        df, headers="keys", tablefmt="html", showindex=False
+                    )
+                except Exception:
+                    # Any issue → signal fallback to markdown renderer
+                    raise
+
+            try:
+                content_html = _render_table_with_pandas(raw_content)
+            except Exception:
+                # Fallback: render content as markdown (supports tables)
+                content_html = markdown2.markdown(raw_content, extras=["tables"])
+        else:
+            # For text, title, figure captions, just escape and preserve whitespace
+            content_html = (
+                f'<div style="white-space: pre-wrap;">{escape(raw_content)}</div>'
+            )
 
         html_parts.append(
             f'<div class="block block-{btype}" style="{style_block(left, top, w, h)}"'
             f' data-type="{btype}" data-idx="{idx}">'
             f'<div class="badge" style="{style_badge()}">{idx}</div>'
             f'<div class="meta" style="position:absolute;right:2px;top:2px;color:#444;font:10px system-ui;opacity:0.75;">{btype}{" · " + score_str if score_str else ""}</div>'
-            f'<div class="content" style="position:absolute;left:6px;right:6px;top:18px;bottom:4px;font:12px/1.35 "Times New Roman", serif;white-space:pre-wrap;color:#111;">{content}</div>'
+            f'<div class="content" style="position:absolute;left:6px;right:6px;top:18px;bottom:4px;font:12px/1.35 "Times New Roman", serif;color:#111;overflow:auto;">{content_html}</div>'
             f"</div>"
         )
 
@@ -114,6 +196,9 @@ def build_document_html(
         "body{background:#f6f7f8;margin:0;padding:16px 8px;font:14px system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;}\n"
         ".doc{max-width:calc(1134px + 48px);margin:0 auto;}\n"
         ".legend{margin:8px auto 16px;color:#444;}\n"
+        "table{border-collapse:collapse;width:100%;font-size:11px;margin-top:4px;}\n"
+        "th,td{border:1px solid #ccc;padding:4px 6px;text-align:left;vertical-align:top;}\n"
+        "th{background:#f2f2f2;font-weight:600;}\n"
         "</style>\n"
         '</head>\n<body>\n<div class="doc">\n'
         '<div class="legend">Absolutely positioned preview from middle.json (bbox-based order). Colors/boxes are for visualization only.</div>\n'

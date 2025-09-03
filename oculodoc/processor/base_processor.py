@@ -594,6 +594,7 @@ class BaseDocumentProcessor(IDocumentProcessor):
                             {
                                 "page_no": page_idx + 1,
                                 "bbox": element.get("bbox", [0, 0, 0, 0]),
+                                "content": element.get("content", ""),
                                 "score": element.get("confidence", 0.0),
                             }
                         )
@@ -602,6 +603,7 @@ class BaseDocumentProcessor(IDocumentProcessor):
                             {
                                 "page_no": page_idx + 1,
                                 "bbox": element.get("bbox", [0, 0, 0, 0]),
+                                "content": element.get("content", ""),
                                 "score": element.get("confidence", 0.0),
                             }
                         )
