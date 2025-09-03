@@ -11,6 +11,7 @@ from oculodoc.processor.hybrid_processor import HybridDocumentProcessor
 from oculodoc.layout import DocLayoutYOLOAnalyzer
 from oculodoc.vlm import SGLangOCRFluxAnalyzer
 from oculodoc.errors import OculodocError
+from oculodoc.utils.reading_order import pages_to_markdown
 
 
 async def create_processor_with_models(config: OculodocConfig):
@@ -117,6 +118,22 @@ async def main() -> None:
                 )
                 print(
                     f"   📊 JSON contains {len(middle_json.get('table_blocks', []))} table blocks"
+                )
+
+                # Generate Markdown output with XY-cut reading order
+                print("\n📝 Generating Markdown output with XY-cut reading order...")
+                markdown_content = pages_to_markdown(
+                    result.pages, use_xycut=True, min_gap=1
+                )
+
+                # Save to markdown file
+                markdown_file = document_path.parent / f"{document_path.stem}.md"
+                with open(markdown_file, "w", encoding="utf-8") as f:
+                    f.write(markdown_content)
+
+                print(f"   ✅ Saved Markdown to: {markdown_file}")
+                print(
+                    f"   📄 Generated {len(markdown_content.split())} words from {result.total_pages} pages"
                 )
 
             else:
