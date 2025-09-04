@@ -192,7 +192,9 @@ class SGLangOCRFluxAnalyzer(IVLMAnalyzer):
                 }
             ],
             "max_tokens": kwargs.get("max_tokens", 2048),
-            "temperature": kwargs.get("temperature", 0.1),
+            "temperature": kwargs.get("temperature", 0.0),
+            "frequency_penalty": 1.2,
+            "presence_penalty": 1.0,
             "stream": False,
         }
 
