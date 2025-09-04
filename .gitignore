@@ -181,3 +181,8 @@ pyrightconfig.json
 
 # residues
 output/
+
+# Local demo artifacts
+demo*.md
+demo*.pdf
+demo*_middle.json
